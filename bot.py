@@ -1,19 +1,19 @@
 from telebot import TeleBot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from logic import *
-import schedule
 import threading
 import time
-from config import *
-import cv2
 import os
+import cv2
+from config import *
 
 bot = TeleBot(API_TOKEN)
+
+SEND_INTERVAL = 60
 
 
 def gen_markup(id):
     markup = InlineKeyboardMarkup()
-    markup.row_width = 1
     markup.add(InlineKeyboardButton("Получить!", callback_data=id))
     return markup
 
@@ -24,16 +24,14 @@ def callback_query(call):
     user_id = call.message.chat.id
 
     if manager.get_winners_count(prize_id) < 3:
-        res = manager.add_winner(user_id, prize_id)
-
-        if res:
+        if manager.add_winner(user_id, prize_id):
             img = manager.get_prize_img(prize_id)
             with open(f'img/{img}', 'rb') as photo:
-                bot.send_photo(user_id, photo, caption="Ты выиграл!")
+                bot.send_photo(user_id, photo, caption="Ты выиграл! +10 монет 💰")
         else:
-            bot.send_message(user_id, "Ты уже получил этот приз!")
+            bot.send_message(user_id, "Ты уже получил это")
     else:
-        bot.send_message(user_id, "Ты не успел 😢")
+        bot.send_message(user_id, "Не успел 😢")
 
 
 def send_message():
@@ -46,61 +44,75 @@ def send_message():
             bot.send_photo(user, photo, reply_markup=gen_markup(prize_id))
 
 
-def shedule_thread():
-    schedule.every(1).minutes.do(send_message)
-
+def scheduler():
     while True:
-        schedule.run_pending()
-        time.sleep(1)
+        send_message()
+        time.sleep(SEND_INTERVAL)
 
 
 @bot.message_handler(commands=['start'])
 def start(message):
+    if message.chat.id not in manager.get_users():
+        manager.add_user(message.chat.id, message.from_user.username)
+        bot.send_message(message.chat.id, "Ты зарегистрирован!")
+
+
+@bot.message_handler(commands=['balance'])
+def balance(message):
+    coins = manager.get_coins(message.chat.id)
+    bot.send_message(message.chat.id, f"💰 {coins} монет")
+
+
+@bot.message_handler(commands=['retry'])
+def retry(message):
     user_id = message.chat.id
 
-    if user_id in manager.get_users():
-        bot.send_message(user_id, "Ты уже зарегистрирован")
-    else:
-        manager.add_user(user_id, message.from_user.username)
-        bot.send_message(user_id, "Ты зарегистрирован!")
+    if not manager.spend_coins(user_id, 5):
+        bot.send_message(user_id, "Нужно 5 монет")
+        return
 
+    import random
+    lost = manager.get_lost_prizes(user_id)
 
-@bot.message_handler(commands=['rating'])
-def rating(message):
-    res = manager.get_rating()
-    text = "\n".join([f"{x[0]} — {x[1]}" for x in res])
-    bot.send_message(message.chat.id, text)
+    if not lost:
+        bot.send_message(user_id, "У тебя всё есть")
+        return
+
+    img = random.choice(lost)[0]
+
+    with open(f'img/{img}', 'rb') as photo:
+        bot.send_photo(user_id, photo, caption="🎁 Бонус!")
 
 
 @bot.message_handler(commands=['my_score'])
-def get_my_score(message):
+def my_score(message):
     user_id = message.chat.id
-
     info = manager.get_winners_img(user_id)
 
     if not info:
-        bot.send_message(user_id, "У тебя пока нет призов")
+        bot.send_message(user_id, "Нет призов")
         return
 
     prizes = [x[0] for x in info]
 
-    image_paths = os.listdir('img')
-    image_paths = [
-        f'img/{x}' if x in prizes else f'hidden_img/{x}'
-        for x in image_paths
-    ]
+    paths = os.listdir('img')
+    paths = [f'img/{x}' if x in prizes else f'hidden_img/{x}' for x in paths]
 
-    collage = create_collage(image_paths)
-
-    if collage is None:
-        bot.send_message(user_id, "Ошибка коллажа")
-        return
+    collage = create_collage(paths)
 
     path = f'collage_{user_id}.jpg'
     cv2.imwrite(path, collage)
 
     with open(path, 'rb') as photo:
         bot.send_photo(user_id, photo)
+
+
+@bot.message_handler(commands=['set_interval'])
+def set_interval(message):
+    global SEND_INTERVAL
+    if message.chat.id == ADMIN_ID:
+        SEND_INTERVAL = int(message.text.split()[1])
+        bot.send_message(message.chat.id, "Интервал обновлён")
 
 
 def polling():
@@ -112,7 +124,7 @@ if __name__ == '__main__':
     manager.create_tables()
 
     t1 = threading.Thread(target=polling)
-    t2 = threading.Thread(target=shedule_thread)
+    t2 = threading.Thread(target=scheduler)
 
     t1.start()
     t2.start()
